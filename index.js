@@ -1,10 +1,28 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import 'dotenv/config';
 
-// --- SERVIDOR WEBSOCKET ---
-const wss = new WebSocketServer({ port: process.env.PORT, host: '0.0.0.0' });
+/* ============================================================
+   CONFIGURACIÓN SERVIDORES WEBSOCKET
+   ============================================================ */
+
+// 1) WebSocket para ESP32 (SIN SSL)
+const wss_esp = new WebSocketServer({
+  port: 8080,
+  host: '0.0.0.0'
+});
+
+// 2) WebSocket para la WEB (CON SSL → Nginx lo convierte en WSS)
+const wss_web = new WebSocketServer({
+  port: 8443,
+  host: '0.0.0.0'
+});
+
+/* ============================================================
+   VARIABLES GLOBALES
+   ============================================================ */
 
 let ultimodato = null;
+let espConectada = false;
 
 // Intervalo PING/PONG
 const HEARTBEAT_INTERVAL = 10000;
@@ -14,63 +32,43 @@ function heartbeat() {
   this.isAlive = true;
 }
 
-wss.on("connection", ws => {
+/* ============================================================
+   1) SERVIDOR PARA ESP32
+   ============================================================ */
+
+wss_esp.on("connection", ws => {
+  espConectada = true; // Marcar ESP32 como conectada
   ws.isAlive = true;
   ws.on('pong', heartbeat);
 
-  console.log('Cliente conectado');
+  console.log('ESP32 conectada al WebSocket');
 
-  
-  const alo = setInterval(() => {
-    if (ws.isAlive === false) {
-      console.log("Cliente no responde → Terminando conexión");
+  const pingInterval = setInterval(() => {
+    if (!ws.isAlive) {
+      console.log("ESP32 no responde → Cerrando conexión");
+      espConectada = false;
       return ws.terminate();
     }
-
     ws.isAlive = false;
     ws.ping();
   }, HEARTBEAT_INTERVAL);
 
-  // --- RECEPCIÓN DE DATOS ---
-  ws.on('message', (message, isBinary, code, reason) => {
+  // RECEPCIÓN DE DATOS DESDE ESP32
+  ws.on('message', (message, isBinary) => {
     const data = isBinary ? message : message.toString();
-    console.log('Dato recibido (raw):', data);
-
-    const sizeBinaryMessage = Buffer.byteLength(message);
-    if(sizeBinaryMessage > 10000){
-      ws.close(1009, "Mensaje demasiado grande");
-      return;
-    }
+    console.log('Dato recibido desde ESP32 (raw):', data);
 
     try {
       const jsonData = JSON.parse(data);
       ultimodato = jsonData;
 
-      // SENSOR DE LUZ (BH1750)
-      console.log("\n=== Datos Sensor BH1750 (Luz) ===");
-      console.log("Intensidad lumínica:", jsonData.lux, "lux");
-      console.log("==================================");
+      // Logs estructurados
+      console.log("\n=== Datos Sensor ===");
+      console.log(jsonData);
+      console.log("====================\n");
 
-      // BMP280
-      console.log("\n=== Datos BMP280 ===");
-      console.log("Temperatura:", jsonData.temperature_bmp, "°C");
-      console.log("Presión:", jsonData.pressure, "hPa");
-      console.log("Altitud:", jsonData.altitude, "m");
-      console.log("======================");
-
-      // DS18B20
-      console.log("\n=== Datos DS18B20 ===");
-      console.log("Temperatura del suelo:", jsonData.temperature_ds18b20, "°C");
-      console.log("======================");
-
-      // HUMEDAD DE SUELO
-      console.log("\n=== Datos Sensor Humedad de Suelo ===");
-      console.log("Valor crudo ADC:", jsonData.soil_moisture_raw);
-      console.log("Porcentaje humedad:", jsonData.soil_moisture_percent, "%");
-      console.log("=====================================\n");
-
-      // Reenvía datos a los clientes conectados
-      wss.clients.forEach(client => {
+      // Reenvía datos a TODOS los clientes web conectados
+      wss_web.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify(ultimodato));
         }
@@ -81,20 +79,55 @@ wss.on("connection", ws => {
     }
   });
 
-  // --- LIMPIAR INTERVALO AL CERRAR ---
-  ws.on('close', (code, reason) => {
-    clearInterval(alo);
-    console.log(`Cliente desconectado. Código:${code}, Razón:${reason}`);
-    console.log("Esperando nueva conexión..")
+  ws.on('close', () => {
+    clearInterval(pingInterval);
+    espConectada = false;
+    console.log("ESP32 desconectada");
   });
+});
 
-  // Enviar último dato si existe
+/* ============================================================
+   2) SERVIDOR PARA LA PÁGINA WEB
+   ============================================================ */
+
+wss_web.on("connection", ws => {
+  // Si ESP32 no está conectada, cerramos la conexión
+  if (!espConectada) {
+    console.log("Cliente WEB intentó conectarse pero ESP32 no está conectada → Cerrando conexión");
+    ws.close();
+    return;
+  }
+
+  ws.isAlive = true;
+  ws.on('pong', heartbeat);
+
+  console.log('Cliente WEB conectado');
+
+  const pingInterval = setInterval(() => {
+    if (!ws.isAlive) {
+      console.log("Cliente WEB no responde → Cerrando conexión");
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  }, HEARTBEAT_INTERVAL);
+
+  // Enviar último dato registrado al entrar
   if (ultimodato) {
     ws.send(JSON.stringify(ultimodato));
   } else {
     ws.send('No hay datos disponibles todavía');
   }
 
+  ws.on('close', () => {
+    clearInterval(pingInterval);
+    console.log("Cliente WEB desconectado");
+  });
 });
 
-console.log(`Servidor WebSocket escuchando en ws://localhost:${process.env.PORT}`);
+/* ============================================================
+   MENSAJES DEL SERVIDOR
+   ============================================================ */
+
+console.log("Servidor ESP32 escuchando en ws://0.0.0.0:8080");
+console.log("Servidor WEB escuchando en ws://0.0.0.0:8443 (Nginx → WSS)");
