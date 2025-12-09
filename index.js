@@ -1,3 +1,5 @@
+import 'dotenv/config'
+import { escribirDato } from './influxdb.js'
 import { WebSocketServer, WebSocket } from 'ws';
 import 'dotenv/config';
 
@@ -74,6 +76,9 @@ wss_esp.on("connection", ws => {
         }
       });
 
+      // --- INTEGRACIÓN CON INFLUXDB ---
+      escribirDato('sensores_esp32', {}, ultimodato);
+
     } catch (err) {
       console.error('Error procesando dato:', err);
     }
@@ -87,7 +92,7 @@ wss_esp.on("connection", ws => {
 });
 
 /* ============================================================
-   2) SERVIDOR PARA LA PÁGINA WEB
+   SERVIDOR PARA LA PÁGINA WEB
    ============================================================ */
 
 wss_web.on("connection", ws => {
